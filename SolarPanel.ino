@@ -9,10 +9,12 @@
 
 #include <WebServer.h>
 #include <WiFi.h>
+#include <DNSServer.h>
 
 // --- WiFi & Server Settings ---
 const char *ssid = "SolarPanel_Monitor"; // Name of the WiFi network
 WebServer server(80);
+DNSServer dnsServer; // DNS Server for Captive Portal
 
 // --- Sensor Settings ---
 // Thermistor
@@ -115,6 +117,12 @@ void handleReadings() {
   server.send(200, "application/json", json);
 }
 
+// Redirect unknown paths to root (essential for Captive Portal)
+void handleNotFound() {
+  server.sendHeader("Location", "/", true); // Redirect to our IP
+  server.send(302, "text/plain", "");
+}
+
 // --- Setup ---
 void setup() {
   Serial.begin(115200);
@@ -138,9 +146,15 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(IP);
 
+  // --- DNS Server Config (Captive Portal) ---
+  // Redirect ALL traffic (wildcard "*") to our own IP
+  dnsServer.start(53, "*", IP);
+  Serial.println("DNS Server started (Captive Portal active)");
+
   // Server Config
   server.on("/", handleRoot);
   server.on("/readings", handleReadings);
+  server.onNotFound(handleNotFound); // Catch-all for other URLs
   server.begin();
   Serial.println("Web Server Started.");
 }
@@ -150,7 +164,8 @@ unsigned long lastTime = 0;
 const long interval = 1000; // Read sensors every 1s
 
 void loop() {
-  // 1. Handle Web Clients (Must run constantly)
+  // 1. Handle Web Clients & DNS (Must run constantly)
+  dnsServer.processNextRequest(); // Handle DNS requests
   server.handleClient();
 
   // 2. Read Sensors (Periodic)
