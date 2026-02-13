@@ -2,14 +2,15 @@
  * ESP32 Solar Panel Monitor & Web Dashboard
  *
  * Features:
- * - Reads Temperature (Thermistor on A4/GPIO 36)
+ * - Reads Temperature (Thermistor on GPIO 36)
  * - Reads Light/Irradiance (Photoresistor on GPIO 34)
+ * - Buzzer Alarm (on GPIO 17 - PWM)
  * - Hosts a Web Dashboard (WiFi: "SolarPanel_Monitor", IP: 192.168.4.1)
  */
 
+#include <DNSServer.h>
 #include <WebServer.h>
 #include <WiFi.h>
-#include <DNSServer.h>
 
 // --- WiFi & Server Settings ---
 const char *ssid = "SolarPanel_Monitor"; // Name of the WiFi network
@@ -17,26 +18,24 @@ WebServer server(80);
 DNSServer dnsServer; // DNS Server for Captive Portal
 
 // --- Sensor Settings ---
-// Thermistor
-// CRITICAL: WiFi uses ADC2 pins (GPIO 0, 2, 4, 12-15, 25-27).
-// We MUST use ADC1 pins (GPIO 32-39) when WiFi is on.
-// A1 is usually GPIO 25 (ADC2) -> Conflict!
-// New Plan: Use A4 (GPIO 36 - often labeled "VP" or "A4" or "36").
-#if defined(A4)
-const int thermistorPin = A4;
-#else
+// Thermistor (GPIO 36 / VP)
 const int thermistorPin = 36;
-#endif
 const float SERIES_RESISTOR = 10000.0;
 const float NOMINAL_RESISTANCE = 10000.0;
 const float NOMINAL_TEMPERATURE = 25.0;
 const float B_COEFFICIENT = 3950.0;
 const float ADC_MAX = 4095.0;
 const float VCC = 3.3;
-const float TEMP_THRESHOLD = 30.0;
+const float TEMP_THRESHOLD = 32.5;
 
-// Photoresistor
+// Photoresistor (GPIO 34)
 const int photoresistorPin = 34;
+
+// Buzzer Settings (PWM for Passive Buzzer on GPIO 17)
+const int buzzerPin = 17;
+const int buzzerChannel = 0;
+const int buzzerFreq = 2000;    // 2 kHz tone
+const int buzzerResolution = 8; // 8-bit resolution (0-255)
 
 // --- Global Variables for Sensor Data ---
 float currentTemp = 0.0;
@@ -44,7 +43,6 @@ int currentLightPercent = 0;
 String currentStatus = "OK";
 
 // --- HTML Dashboard (Stored in Program Memory) ---
-// Note: We use raw string literal R"()" for cleaner HTML
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
@@ -108,7 +106,6 @@ setInterval(function() {
 void handleRoot() { server.send(200, "text/html", index_html); }
 
 void handleReadings() {
-  // Create JSON string: {"temp": 25.5, "light": 80, "status": "OK"}
   String json = "{";
   json += "\"temp\":" + String(currentTemp) + ",";
   json += "\"light\":" + String(currentLightPercent) + ",";
@@ -117,9 +114,10 @@ void handleReadings() {
   server.send(200, "application/json", json);
 }
 
-// Redirect unknown paths to root (essential for Captive Portal)
+// Redirect unknown paths to root  for Captive Portal
 void handleNotFound() {
-  server.sendHeader("Location", "/", true); // Redirect to our IP
+  // custom domain name
+  server.sendHeader("Location", "http://solar.panel", true);
   server.send(302, "text/plain", "");
 }
 
@@ -129,6 +127,15 @@ void setup() {
 
   // ADC Config
   analogReadResolution(12);
+
+// Buzzer Config (Passive - Needs PWM)
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(buzzerPin, buzzerFreq, buzzerResolution);
+#else
+  // Fallback for older cores (just in case)
+  ledcSetup(buzzerChannel, buzzerFreq, buzzerResolution);
+  ledcAttachPin(buzzerPin, buzzerChannel);
+#endif
 
   // WiFi Config (SoftAP)
   Serial.println("\n--- Starting Solar Panel Monitor ---");
@@ -204,9 +211,22 @@ void loop() {
     // --- Logic Checks ---
     if (currentTemp > TEMP_THRESHOLD) {
       currentStatus = "WARNING: HIGH TEMP!";
-      // Fan Logic Placeholder
+
+// Select PWM function based on Core version
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+      ledcWrite(buzzerPin, 128); // 50% duty
+#else
+      ledcWrite(buzzerChannel, 128);
+#endif
+
     } else {
       currentStatus = "System Normal";
+
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+      ledcWrite(buzzerPin, 0); // 0% duty
+#else
+      ledcWrite(buzzerChannel, 0);
+#endif
     }
 
     // --- Serial Debug ---
