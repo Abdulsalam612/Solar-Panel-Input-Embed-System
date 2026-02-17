@@ -44,56 +44,161 @@ String currentStatus = "OK";
 
 // --- HTML Dashboard (Stored in Program Memory) ---
 const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html>
+<!DOCTYPE HTML><html lang="en">
 <head>
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Solar Panel Monitor</title>
+  <title>Solar Monitor</title>
   <style>
-    body { font-family: 'Segoe UI', sans-serif; text-align: center; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
-    h1 { color: #4caf50; }
-    .card { background: #1e1e1e; max-width: 400px; margin: 0 auto 20px; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-    .value { font-size: 2.5rem; font-weight: bold; }
-    .unit { font-size: 1.2rem; color: #888; }
-    .label { font-size: 1rem; color: #bbb; text-transform: uppercase; letter-spacing: 1px; }
-    .warning { color: #ff5252; animation: blink 1s infinite; }
+    body { font-family: 'Segoe UI', Roboto, sans-serif; text-align: center; background-color: #0f0f0f; color: #e0e0e0; margin: 0; padding: 20px; }
+    h1 { color: #fbc02d; text-shadow: 0 0 10px rgba(251, 192, 45, 0.3); margin-bottom: 30px; }
+    
+    .dashboard { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }
+    
+    .card { 
+      background: #1e1e1e; 
+      width: 100%; max-width: 360px; 
+      padding: 20px; border-radius: 15px; 
+      box-shadow: 0 8px 16px rgba(0,0,0,0.5); 
+      border: 1px solid #333;
+      transition: transform 0.2s;
+    }
+    .card:hover { transform: translateY(-2px); border-color: #555; }
+    
+    .label { font-size: 0.9rem; color: #aaa; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+    .value-box { display: flex; align-items: baseline; justify-content: center; margin-bottom: 15px; }
+    .value { font-size: 3rem; font-weight: 700; color: #fff; }
+    .unit { font-size: 1.2rem; color: #666; margin-left: 5px; }
+    
+    .status-card { max-width: 500px; border-left: 5px solid #4caf50; }
+    .status-ok { color: #4caf50; }
+    .status-warn { color: #ff5252; animation: blink 1s infinite; }
+    
+    canvas { 
+      background: #121212; 
+      border-radius: 8px; 
+      width: 100%; 
+      height: 120px; 
+      border: 1px solid #2a2a2a;
+    }
+    
     @keyframes blink { 50% { opacity: 0.5; } }
   </style>
 </head>
 <body>
-  <h1>Solar Monitor</h1>
+  <h1>&#9728; Solar Panel Monitor</h1>
   
-  <div class="card">
-    <div class="label">Temperature</div>
-    <div id="temp" class="value">--</div>
-    <div class="unit">&deg;C</div>
-  </div>
-  
-  <div class="card">
-    <div class="label">Irradiance (Light)</div>
-    <div id="light" class="value">--</div>
-    <div class="unit">%</div>
+  <div class="dashboard">
+    <!-- Temperature Card -->
+    <div class="card">
+      <div class="label">Temperature</div>
+      <div class="value-box">
+        <div id="temp" class="value">--</div><div class="unit">&deg;C</div>
+      </div>
+      <canvas id="tempChart"></canvas>
+    </div>
+    
+    <!-- Light Card -->
+    <div class="card">
+      <div class="label">Irradiance</div>
+      <div class="value-box">
+        <div id="light" class="value">--</div><div class="unit">%</div>
+      </div>
+      <canvas id="lightChart"></canvas>
+    </div>
   </div>
 
-  <div class="card">
-    <div class="label">Status</div>
-    <div id="status" class="value" style="font-size: 1.5rem;">--</div>
+  <br>
+  
+  <!-- Status Card -->
+  <div class="card status-card" id="statusCard">
+    <div class="label">System Status</div>
+    <div id="status" class="value" style="font-size: 1.8rem;">--</div>
   </div>
 
 <script>
+// --- Graph Logic ---
+const maxPoints = 60; // 60 seconds history
+let tempData = new Array(maxPoints).fill(0);
+let lightData = new Array(maxPoints).fill(0);
+
+function drawChart(id, data, color, min, max) {
+  const canvas = document.getElementById(id);
+  const ctx = canvas.getContext('2d');
+  
+  // Handle high DPI displays
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  
+  const w = rect.width;
+  const h = rect.height;
+  
+  ctx.clearRect(0, 0, w, h);
+  
+  // Draw Grid (Optional)
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h/2); ctx.lineTo(w, h/2);
+  ctx.stroke();
+
+  // Draw Line
+  ctx.beginPath();
+  const step = w / (maxPoints - 1);
+  
+  data.forEach((val, i) => {
+    // Map value to Y coordinate
+    // Invert Y because canvas 0 is top
+    let normalized = (val - min) / (max - min); 
+    if(normalized < 0) normalized = 0;
+    if(normalized > 1) normalized = 1;
+    
+    const y = h - (normalized * h);
+    
+    if(i === 0) ctx.moveTo(0, y);
+    else ctx.lineTo(i * step, y);
+  });
+  
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  
+  // Fill Area
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.fillStyle = color + "22"; // Low opacity
+  ctx.fill();
+}
+
+// Update Loop
 setInterval(function() {
   fetch("/readings")
     .then(response => response.json())
     .then(data => {
+      // 1. Update text
       document.getElementById("temp").innerHTML = data.temp.toFixed(1);
       document.getElementById("light").innerHTML = data.light;
       document.getElementById("status").innerHTML = data.status;
       
-      // Update Status Color
+      // 2. Update Charts
+      tempData.push(data.temp); tempData.shift();
+      lightData.push(data.light); lightData.shift();
+      
+      // Draw (Color, Min, Max)
+      drawChart("tempChart", tempData, "#ff5252", 0, 50); // Temp Graph 0-50C
+      drawChart("lightChart", lightData, "#fbc02d", 0, 100); // Light Graph 0-100%
+      
+      // 3. Status Styling
+      const statusCard = document.getElementById("statusCard");
       if(data.status.includes("WARNING")) {
-        document.getElementById("status").className = "value warning";
+        document.getElementById("status").className = "value status-warn";
+        statusCard.style.borderLeftColor = "#ff5252";
       } else {
-        document.getElementById("status").className = "value";
-        document.getElementById("status").style.color = "#4caf50";
+        document.getElementById("status").className = "value status-ok";
+        statusCard.style.borderLeftColor = "#4caf50";
       }
     });
 }, 1000); // Update every 1 second
