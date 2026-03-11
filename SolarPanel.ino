@@ -6,8 +6,10 @@
  * - Reads Light/Irradiance (Photoresistor on GPIO 34)
  * - Buzzer Alarm (on GPIO 17 - PWM)
  * - Hosts a Web Dashboard (WiFi: "SolarPanel_Monitor", IP: 192.168.4.1)
+ * - Simulates Locations based on sensor data
  */
 
+#include "DFRobotDFPlayerMini.h"
 #include <DNSServer.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -31,6 +33,12 @@ const float TEMP_THRESHOLD = 32.5;
 // Photoresistor (GPIO 34)
 const int photoresistorPin = 34;
 
+// DFPlayer Mini Settings (UART)
+const int dfplayerRX = 16;  // ESP32 RX (Connect to DFPlayer TX)
+const int dfplayerTX = 4;   // ESP32 TX (Connect to DFPlayer RX)
+HardwareSerial dfSerial(1); // Use UART1 for DFPlayer
+DFRobotDFPlayerMini myDFPlayer;
+
 // Buzzer Settings (PWM for Passive Buzzer on GPIO 17)
 const int buzzerPin = 17;
 const int buzzerChannel = 0;
@@ -41,6 +49,7 @@ const int buzzerResolution = 8; // 8-bit resolution (0-255)
 float currentTemp = 0.0;
 int currentLightPercent = 0;
 String currentStatus = "OK";
+String currentLocation = "Unknown"; // New: Simulated Location
 
 // --- HTML Dashboard (Stored in Program Memory) ---
 const char index_html[] PROGMEM = R"rawliteral(
@@ -74,6 +83,8 @@ const char index_html[] PROGMEM = R"rawliteral(
     .status-ok { color: #4caf50; }
     .status-warn { color: #ff5252; animation: blink 1s infinite; }
     
+    .location-text { font-size: 1.5rem; color: #4fc3f7; font-weight: 600; }
+    
     canvas { 
       background: #121212; 
       border-radius: 8px; 
@@ -81,8 +92,6 @@ const char index_html[] PROGMEM = R"rawliteral(
       height: 120px; 
       border: 1px solid #2a2a2a;
     }
-    
-    @keyframes blink { 50% { opacity: 0.5; } }
   </style>
 </head>
 <body>
@@ -110,67 +119,50 @@ const char index_html[] PROGMEM = R"rawliteral(
 
   <br>
   
-  <!-- Status Card -->
-  <div class="card status-card" id="statusCard">
-    <div class="label">System Status</div>
-    <div id="status" class="value" style="font-size: 1.8rem;">--</div>
+  <div class="dashboard">
+    <!-- Location Card (New) -->
+    <div class="card" style="border-top: 5px solid #4fc3f7;">
+      <div class="label">Simulated Location</div>
+      <div id="loc" class="value location-text">--</div>
+    </div>
+
+    <!-- Status Card -->
+    <div class="card status-card" id="statusCard">
+      <div class="label">System Status</div>
+      <div id="status" class="value" style="font-size: 1.5rem;">--</div>
+    </div>
   </div>
 
 <script>
 // --- Graph Logic ---
-const maxPoints = 60; // 60 seconds history
+const maxPoints = 60; 
 let tempData = new Array(maxPoints).fill(0);
 let lightData = new Array(maxPoints).fill(0);
 
 function drawChart(id, data, color, min, max) {
   const canvas = document.getElementById(id);
   const ctx = canvas.getContext('2d');
-  
-  // Handle high DPI displays
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   canvas.width = rect.width * dpr;
   canvas.height = rect.height * dpr;
   ctx.scale(dpr, dpr);
-  
-  const w = rect.width;
-  const h = rect.height;
+  const w = rect.width; const h = rect.height;
   
   ctx.clearRect(0, 0, w, h);
-  
-  // Draw Grid (Optional)
-  ctx.strokeStyle = '#222';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, h/2); ctx.lineTo(w, h/2);
-  ctx.stroke();
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
 
-  // Draw Line
   ctx.beginPath();
   const step = w / (maxPoints - 1);
-  
   data.forEach((val, i) => {
-    // Map value to Y coordinate
-    // Invert Y because canvas 0 is top
     let normalized = (val - min) / (max - min); 
-    if(normalized < 0) normalized = 0;
-    if(normalized > 1) normalized = 1;
-    
+    if(normalized < 0) normalized = 0; if(normalized > 1) normalized = 1;
     const y = h - (normalized * h);
-    
-    if(i === 0) ctx.moveTo(0, y);
-    else ctx.lineTo(i * step, y);
+    if(i === 0) ctx.moveTo(0, y); else ctx.lineTo(i * step, y);
   });
-  
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  
-  // Fill Area
-  ctx.lineTo(w, h);
-  ctx.lineTo(0, h);
-  ctx.fillStyle = color + "22"; // Low opacity
-  ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+  ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.fillStyle = color + "22"; ctx.fill();
 }
 
 // Update Loop
@@ -178,20 +170,16 @@ setInterval(function() {
   fetch("/readings")
     .then(response => response.json())
     .then(data => {
-      // 1. Update text
       document.getElementById("temp").innerHTML = data.temp.toFixed(1);
       document.getElementById("light").innerHTML = data.light;
       document.getElementById("status").innerHTML = data.status;
+      document.getElementById("loc").innerHTML = data.location; // Update Location
       
-      // 2. Update Charts
       tempData.push(data.temp); tempData.shift();
       lightData.push(data.light); lightData.shift();
+      drawChart("tempChart", tempData, "#ff5252", 0, 50);
+      drawChart("lightChart", lightData, "#fbc02d", 0, 100);
       
-      // Draw (Color, Min, Max)
-      drawChart("tempChart", tempData, "#ff5252", 0, 50); // Temp Graph 0-50C
-      drawChart("lightChart", lightData, "#fbc02d", 0, 100); // Light Graph 0-100%
-      
-      // 3. Status Styling
       const statusCard = document.getElementById("statusCard");
       if(data.status.includes("WARNING")) {
         document.getElementById("status").className = "value status-warn";
@@ -201,7 +189,7 @@ setInterval(function() {
         statusCard.style.borderLeftColor = "#4caf50";
       }
     });
-}, 1000); // Update every 1 second
+}, 1000);
 </script>
 </body>
 </html>
@@ -214,16 +202,46 @@ void handleReadings() {
   String json = "{";
   json += "\"temp\":" + String(currentTemp) + ",";
   json += "\"light\":" + String(currentLightPercent) + ",";
+  json += "\"location\":\"" + currentLocation + "\","; // Send Location
   json += "\"status\":\"" + currentStatus + "\"";
   json += "}";
   server.send(200, "application/json", json);
 }
 
-// Redirect unknown paths to root  for Captive Portal
+// Redirect unknown paths to root
 void handleNotFound() {
-  // custom domain name
   server.sendHeader("Location", "http://solar.panel", true);
   server.send(302, "text/plain", "");
+}
+
+void determineLocation(float temp, int light) {
+  // Logic to simulate locations based on sensor readings
+  if (temp > 35) {
+    if (light > 80)
+      currentLocation = "Sahara Desert";
+    else
+      currentLocation = "Death Valley (Night)";
+  } else if (temp > 25) {
+    if (light > 70)
+      currentLocation = "Spain / Florida";
+    else
+      currentLocation = "Brazil (Rainforest)";
+  } else if (temp > 15) {
+    if (light > 50)
+      currentLocation = "France / Italy";
+    else
+      currentLocation = "UK (Summer)";
+  } else if (temp > 5) {
+    if (light > 40)
+      currentLocation = "London (Cloudy)";
+    else
+      currentLocation = "Seattle / Bergen";
+  } else {
+    if (light > 80)
+      currentLocation = "Antarctica (Sunny)";
+    else
+      currentLocation = "Arctic Circle";
+  }
 }
 
 // --- Setup ---
@@ -233,11 +251,22 @@ void setup() {
   // ADC Config
   analogReadResolution(12);
 
+  // DFPlayer Config
+  dfSerial.begin(9600, SERIAL_8N1, dfplayerRX, dfplayerTX);
+  Serial.println("Initializing DFPlayer Mini...");
+  if (!myDFPlayer.begin(dfSerial)) {
+    Serial.println("DFPlayer error! Check RX/TX wiring or SD Card.");
+  } else {
+    Serial.println("DFPlayer online.");
+    // Start at a lower volume to prevent brownouts with 3W speakers!
+    myDFPlayer.volume(10); // Volume 0-30
+    myDFPlayer.loop(1);    // Continuously loop track 1
+  }
+
 // Buzzer Config (Passive - Needs PWM)
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   ledcAttach(buzzerPin, buzzerFreq, buzzerResolution);
 #else
-  // Fallback for older cores (just in case)
   ledcSetup(buzzerChannel, buzzerFreq, buzzerResolution);
   ledcAttachPin(buzzerPin, buzzerChannel);
 #endif
@@ -245,7 +274,6 @@ void setup() {
   // WiFi Config (SoftAP)
   Serial.println("\n--- Starting Solar Panel Monitor ---");
 
-  // Force disconnect/reset to clear old settings
   WiFi.disconnect(true);
   delay(100);
   WiFi.mode(WIFI_AP);
@@ -258,33 +286,30 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(IP);
 
-  // --- DNS Server Config (Captive Portal) ---
-  // Redirect ALL traffic (wildcard "*") to our own IP
+  // --- DNS Server Config ---
   dnsServer.start(53, "*", IP);
-  Serial.println("DNS Server started (Captive Portal active)");
+  Serial.println("DNS Server started");
 
   // Server Config
   server.on("/", handleRoot);
   server.on("/readings", handleReadings);
-  server.onNotFound(handleNotFound); // Catch-all for other URLs
+  server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("Web Server Started.");
 }
 
-// --- Loop (Non-Blocking) ---
+// --- Loop ---
 unsigned long lastTime = 0;
-const long interval = 1000; // Read sensors every 1s
+const long interval = 1000;
 
 void loop() {
-  // 1. Handle Web Clients & DNS (Must run constantly)
-  dnsServer.processNextRequest(); // Handle DNS requests
+  dnsServer.processNextRequest();
   server.handleClient();
 
-  // 2. Read Sensors (Periodic)
   if (millis() - lastTime > interval) {
     lastTime = millis();
 
-    // --- Read Thermistor ---
+    // Read Thermistor
     int adcTherm = analogRead(thermistorPin);
     float resistance = 0;
     if (adcTherm == 0)
@@ -300,48 +325,47 @@ void loop() {
     steinhart += 1.0 / (NOMINAL_TEMPERATURE + 273.15);
     steinhart = 1.0 / steinhart;
     steinhart -= 273.15;
+    currentTemp = steinhart;
 
-    currentTemp = steinhart; // Update global var
-
-    // --- Read Photoresistor ---
+    // Read Photoresistor
     int adcLDR = analogRead(photoresistorPin);
     long lightPercent = map(adcLDR, 4095, 0, 0, 100);
     if (lightPercent < 0)
       lightPercent = 0;
     if (lightPercent > 100)
       lightPercent = 100;
+    currentLightPercent = lightPercent;
 
-    currentLightPercent = lightPercent; // Update global var
+    // Determine Location Simulation
+    determineLocation(currentTemp, currentLightPercent);
 
-    // --- Logic Checks ---
+    // Logic Checks
     if (currentTemp > TEMP_THRESHOLD) {
       currentStatus = "WARNING: HIGH TEMP!";
-
-// Select PWM function based on Core version
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-      ledcWrite(buzzerPin, 128); // 50% duty
+      ledcWrite(buzzerPin, 128);
 #else
       ledcWrite(buzzerChannel, 128);
 #endif
-
     } else {
       currentStatus = "System Normal";
-
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-      ledcWrite(buzzerPin, 0); // 0% duty
+      ledcWrite(buzzerPin, 0);
 #else
       ledcWrite(buzzerChannel, 0);
 #endif
     }
 
-    // --- Serial Debug ---
+    // Serial Debug
     Serial.print("Web Clients: ");
     Serial.print(WiFi.softAPgetStationNum());
     Serial.print(" | Temp: ");
     Serial.print(currentTemp, 1);
     Serial.print(" C | Light: ");
     Serial.print(currentLightPercent);
-    Serial.print("% | Status: ");
+    Serial.print("% | Location: ");
+    Serial.print(currentLocation);
+    Serial.print(" | Status: ");
     Serial.println(currentStatus);
   }
 }
