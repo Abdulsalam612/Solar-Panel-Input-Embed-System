@@ -28,7 +28,7 @@ const float NOMINAL_TEMPERATURE = 25.0;
 const float B_COEFFICIENT = 3950.0;
 const float ADC_MAX = 4095.0;
 const float VCC = 3.3;
-const float TEMP_THRESHOLD = 32.5;
+const float TEMP_THRESHOLD = 30.0;
 
 // Photoresistor (GPIO 34)
 const int photoresistorPin = 34;
@@ -50,6 +50,7 @@ float currentTemp = 0.0;
 int currentLightPercent = 0;
 String currentStatus = "OK";
 String currentLocation = "Unknown"; // New: Simulated Location
+bool isPlayingMP3 = false; // Tracks MP3 state to prevent spamming play commands
 
 // --- HTML Dashboard (Stored in Program Memory) ---
 const char index_html[] PROGMEM = R"rawliteral(
@@ -253,14 +254,18 @@ void setup() {
 
   // DFPlayer Config
   dfSerial.begin(9600, SERIAL_8N1, dfplayerRX, dfplayerTX);
-  Serial.println("Initializing DFPlayer Mini...");
+  Serial.println("Initializing DFPlayer Mini... Waiting 3 seconds for it to boot.");
+  
+  // The DFPlayer takes a few seconds to boot up and read the SD Card
+  // If we talk to it too fast, it will error out!
+  delay(3000); 
+
   if (!myDFPlayer.begin(dfSerial)) {
     Serial.println("DFPlayer error! Check RX/TX wiring or SD Card.");
   } else {
     Serial.println("DFPlayer online.");
-    // Start at a lower volume to prevent brownouts with 3W speakers!
-    myDFPlayer.volume(10); // Volume 0-30
-    myDFPlayer.loop(1);    // Continuously loop track 1
+    myDFPlayer.volume(30); // Max Volume (0-30)
+    // Removed unconditional loop(1) from here!
   }
 
 // Buzzer Config (Passive - Needs PWM)
@@ -339,21 +344,37 @@ void loop() {
     // Determine Location Simulation
     determineLocation(currentTemp, currentLightPercent);
 
-    // Logic Checks
+    // --- Logic Checks ---
     if (currentTemp > TEMP_THRESHOLD) {
       currentStatus = "WARNING: HIGH TEMP!";
+
+// Select PWM function based on Core version
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-      ledcWrite(buzzerPin, 128);
+      ledcWrite(buzzerPin, 128); // 50% duty
 #else
       ledcWrite(buzzerChannel, 128);
 #endif
+
+      // Start MP3 Alarm if not already playing
+      if (!isPlayingMP3) {
+        myDFPlayer.loop(1);
+        isPlayingMP3 = true;
+      }
+
     } else {
       currentStatus = "System Normal";
+
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-      ledcWrite(buzzerPin, 0);
+      ledcWrite(buzzerPin, 0); // 0% duty
 #else
       ledcWrite(buzzerChannel, 0);
 #endif
+
+      // Stop MP3 Alarm if temperature drops
+      if (isPlayingMP3) {
+        myDFPlayer.pause();
+        isPlayingMP3 = false;
+      }
     }
 
     // Serial Debug
