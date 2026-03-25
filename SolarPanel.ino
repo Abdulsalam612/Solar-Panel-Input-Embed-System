@@ -51,6 +51,7 @@ int currentLightPercent = 0;
 String currentStatus = "OK";
 String currentLocation = "Unknown"; // New: Simulated Location
 bool isPlayingMP3 = false; // Tracks MP3 state to prevent spamming play commands
+bool manualAlarm = false; // Tracks manual test alarm state
 
 // --- HTML Dashboard (Stored in Program Memory) ---
 const char index_html[] PROGMEM = R"rawliteral(
@@ -131,10 +132,18 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div class="card status-card" id="statusCard">
       <div class="label">System Status</div>
       <div id="status" class="value" style="font-size: 1.5rem;">--</div>
+      <button id="alarmBtn" onclick="toggleAlarm()" style="margin-top:15px; padding:15px 20px; background:#ff5252; color:#fff; border:none; border-radius:5px; font-weight:bold; cursor:pointer; width:100%; font-size: 1.1rem; transition: background 0.2s;">
+        Test Alarm
+      </button>
     </div>
   </div>
 
 <script>
+// --- Manual Alarm ---
+function toggleAlarm() {
+  fetch("/toggle_alarm");
+}
+
 // --- Graph Logic ---
 const maxPoints = 60; 
 let tempData = new Array(maxPoints).fill(0);
@@ -189,8 +198,18 @@ setInterval(function() {
         document.getElementById("status").className = "value status-ok";
         statusCard.style.borderLeftColor = "#4caf50";
       }
+      
+      // Update Button text and color
+      const btn = document.getElementById("alarmBtn");
+      if (data.manual_alarm) {
+        btn.innerHTML = "Turn Off Alarm";
+        btn.style.background = "#555";
+      } else {
+        btn.innerHTML = "Test Alarm (Simulate Overheat)";
+        btn.style.background = "#ff5252";
+      }
     });
-}, 1000);
+}, 1000); // Update every 1 second
 </script>
 </body>
 </html>
@@ -204,9 +223,15 @@ void handleReadings() {
   json += "\"temp\":" + String(currentTemp) + ",";
   json += "\"light\":" + String(currentLightPercent) + ",";
   json += "\"location\":\"" + currentLocation + "\","; // Send Location
+  json += "\"manual_alarm\":" + String(manualAlarm ? "true" : "false") + ",";
   json += "\"status\":\"" + currentStatus + "\"";
   json += "}";
   server.send(200, "application/json", json);
+}
+
+void handleToggleAlarm() {
+  manualAlarm = !manualAlarm;
+  server.send(200, "text/plain", manualAlarm ? "ON" : "OFF");
 }
 
 // Redirect unknown paths to root
@@ -298,7 +323,8 @@ void setup() {
   // Server Config
   server.on("/", handleRoot);
   server.on("/readings", handleReadings);
-  server.onNotFound(handleNotFound);
+  server.on("/toggle_alarm", handleToggleAlarm);
+  server.onNotFound(handleNotFound); // Catch-all for other URLs
   server.begin();
   Serial.println("Web Server Started.");
 }
@@ -345,8 +371,12 @@ void loop() {
     determineLocation(currentTemp, currentLightPercent);
 
     // --- Logic Checks ---
-    if (currentTemp > TEMP_THRESHOLD) {
-      currentStatus = "WARNING: HIGH TEMP!";
+    if (currentTemp > TEMP_THRESHOLD || manualAlarm) {
+      if (manualAlarm) {
+        currentStatus = "WARNING: TEST ALARM ACTIVE!";
+      } else {
+        currentStatus = "WARNING: HIGH TEMP!";
+      }
 
 // Select PWM function based on Core version
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
