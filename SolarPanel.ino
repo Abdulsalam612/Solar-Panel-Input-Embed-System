@@ -19,6 +19,7 @@
 
 // --- WiFi & Server Settings ---
 const char *ssid = "SolarPanel_Monitor"; // Name of the WiFi network
+const char *wifiPassword = "Experiment"; // WPA2 Password
 WebServer server(80);
 DNSServer dnsServer; // DNS Server for Captive Portal
 
@@ -140,7 +141,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     </div>
     
     <!-- Data Actions Card -->
-    <div class="card" style="border-top: 5px solid #ab47bc;">
+    <div class="card" id="dataActions" style="display:none; border-top: 5px solid #ab47bc;">
       <div class="label">Data Storage</div>
       <a href="/download" style="display:inline-block; margin-top:10px; padding:15px 20px; background:#ab47bc; color:#fff; border:none; border-radius:5px; font-weight:bold; cursor:pointer; width:80%; font-size: 1.1rem; text-decoration:none; transition: background 0.2s;">
         Download CSV
@@ -154,10 +155,14 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div class="card status-card" id="statusCard">
       <div class="label">System Status</div>
       <div id="status" class="value" style="font-size: 1.5rem;">--</div>
-      <button id="alarmBtn" onclick="toggleAlarm()" style="margin-top:15px; padding:15px 20px; background:#ff5252; color:#fff; border:none; border-radius:5px; font-weight:bold; cursor:pointer; width:100%; font-size: 1.1rem; transition: background 0.2s;">
+      <button id="alarmBtn" onclick="toggleAlarm()" style="display:none; margin-top:15px; padding:15px 20px; background:#ff5252; color:#fff; border:none; border-radius:5px; font-weight:bold; cursor:pointer; width:100%; font-size: 1.1rem; transition: background 0.2s;">
         Test Alarm
       </button>
     </div>
+  </div>
+
+  <div id="loginSection" style="margin-top: 30px;">
+    <a href="/admin_login" style="color: #555; text-decoration: none; font-size: 0.9rem;">Admin Login</a>
   </div>
 
 <script>
@@ -230,14 +235,26 @@ setInterval(function() {
         statusCard.style.borderLeftColor = "#4caf50";
       }
       
-      // Update Button text and color
+      // Update Admin UI
       const btn = document.getElementById("alarmBtn");
-      if (data.manual_alarm) {
-        btn.innerHTML = "Turn Off Alarm";
-        btn.style.background = "#555";
+      const dataActions = document.getElementById("dataActions");
+      const loginSection = document.getElementById("loginSection");
+      
+      if (data.is_admin) {
+        btn.style.display = "block";
+        dataActions.style.display = "block";
+        loginSection.style.display = "none";
+        if (data.manual_alarm) {
+          btn.innerHTML = "Turn Off Alarm";
+          btn.style.background = "#555";
+        } else {
+          btn.innerHTML = "Test Alarm (Simulate Overheat)";
+          btn.style.background = "#ff5252";
+        }
       } else {
-        btn.innerHTML = "Test Alarm (Simulate Overheat)";
-        btn.style.background = "#ff5252";
+        btn.style.display = "none";
+        dataActions.style.display = "none";
+        loginSection.style.display = "block";
       }
     });
 }, 1000); // Update every 1 second
@@ -250,22 +267,27 @@ setInterval(function() {
 void handleRoot() { server.send(200, "text/html", index_html); }
 
 void handleReadings() {
+  bool isAdmin = server.authenticate("staff", "AccessControl");
+  
   String json = "{";
   json += "\"temp\":" + String(currentTemp) + ",";
   json += "\"light\":" + String(currentLightPercent) + ",";
-  json += "\"location\":\"" + currentLocation + "\","; // Send Location
+  json += "\"location\":\"" + currentLocation + "\","; 
   json += "\"manual_alarm\":" + String(manualAlarm ? "true" : "false") + ",";
+  json += "\"is_admin\":" + String(isAdmin ? "true" : "false") + ",";
   json += "\"status\":\"" + currentStatus + "\"";
   json += "}";
   server.send(200, "application/json", json);
 }
 
 void handleToggleAlarm() {
+  if (!server.authenticate("staff", "AccessControl")) { return server.requestAuthentication(); }
   manualAlarm = !manualAlarm;
   server.send(200, "text/plain", manualAlarm ? "ON" : "OFF");
 }
 
 void handleDownload() {
+  if (!server.authenticate("staff", "AccessControl")) { return server.requestAuthentication(); }
   File file = LittleFS.open("/data_log.csv", "r");
   if (!file) {
     server.send(404, "text/plain", "Log file not found. Restart ESP32.");
@@ -277,6 +299,7 @@ void handleDownload() {
 }
 
 void handleClearLog() {
+  if (!server.authenticate("staff", "AccessControl")) { return server.requestAuthentication(); }
   // Opening in "w" mode immediately wipes any existing data and starts fresh
   File file = LittleFS.open("/data_log.csv", "w");
   if (file) {
@@ -302,6 +325,14 @@ void handleSetTime() {
   } else {
     server.send(400, "text/plain", "Missing epoch");
   }
+}
+
+void handleAdminLogin() {
+  if (!server.authenticate("staff", "AccessControl")) {
+    return server.requestAuthentication();
+  }
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "Logged in");
 }
 
 // Redirect unknown paths to root
@@ -402,7 +433,7 @@ void setup() {
 
   Serial.print("Setting up WiFi AP: ");
   Serial.println(ssid);
-  WiFi.softAP(ssid);
+  WiFi.softAP(ssid, wifiPassword);
 
   IPAddress IP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
@@ -419,6 +450,7 @@ void setup() {
   server.on("/download", HTTP_GET, handleDownload);
   server.on("/clear_log", HTTP_GET, handleClearLog);
   server.on("/set_time", HTTP_GET, handleSetTime);
+  server.on("/admin_login", HTTP_GET, handleAdminLogin);
   server.onNotFound(handleNotFound); // Catch-all for other URLs
   server.begin();
   Serial.println("Web Server Started.");
