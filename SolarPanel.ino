@@ -13,6 +13,9 @@
 #include <DNSServer.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <LittleFS.h>
+#include <time.h>
+#include <sys/time.h>
 
 // --- WiFi & Server Settings ---
 const char *ssid = "SolarPanel_Monitor"; // Name of the WiFi network
@@ -39,6 +42,9 @@ const int dfplayerTX = 4;   // ESP32 TX (Connect to DFPlayer RX)
 HardwareSerial dfSerial(1); // Use UART1 for DFPlayer
 DFRobotDFPlayerMini myDFPlayer;
 
+// --- Fan Settings ---
+const int fanPin = 26; // Output pin to control Relay / MOSFET
+
 // Buzzer Settings (PWM for Passive Buzzer on GPIO 17)
 const int buzzerPin = 17;
 const int buzzerChannel = 0;
@@ -52,6 +58,11 @@ String currentStatus = "OK";
 String currentLocation = "Unknown"; // New: Simulated Location
 bool isPlayingMP3 = false; // Tracks MP3 state to prevent spamming play commands
 bool manualAlarm = false; // Tracks manual test alarm state
+bool timeSynced = false; // Tracks if browser has provided date/time
+
+// --- Logging Settings ---
+unsigned long lastLogTime = 0;
+const long logInterval = 10000; // 10 seconds
 
 // --- HTML Dashboard (Stored in Program Memory) ---
 const char index_html[] PROGMEM = R"rawliteral(
@@ -122,10 +133,21 @@ const char index_html[] PROGMEM = R"rawliteral(
   <br>
   
   <div class="dashboard">
-    <!-- Location Card (New) -->
+    <!-- Location Card -->
     <div class="card" style="border-top: 5px solid #4fc3f7;">
       <div class="label">Simulated Location</div>
       <div id="loc" class="value location-text">--</div>
+    </div>
+    
+    <!-- Data Actions Card -->
+    <div class="card" style="border-top: 5px solid #ab47bc;">
+      <div class="label">Data Storage</div>
+      <a href="/download" style="display:inline-block; margin-top:10px; padding:15px 20px; background:#ab47bc; color:#fff; border:none; border-radius:5px; font-weight:bold; cursor:pointer; width:80%; font-size: 1.1rem; text-decoration:none; transition: background 0.2s;">
+        Download CSV
+      </a>
+      <a href="#" onclick="if(confirm('Delete all saved data?')) { fetch('/clear_log').then(()=>alert('Data Cleared! Reboot ESP32.')); }" style="display:inline-block; margin-top:15px; padding:10px 20px; background:#555; color:#fff; border:none; border-radius:5px; font-weight:bold; cursor:pointer; width:80%; font-size: 1rem; text-decoration:none;">
+        Clear Data
+      </a>
     </div>
 
     <!-- Status Card -->
@@ -143,6 +165,15 @@ const char index_html[] PROGMEM = R"rawliteral(
 function toggleAlarm() {
   fetch("/toggle_alarm");
 }
+
+// --- Time Sync ---
+function syncTime() {
+  const now = new Date();
+  // Calculate artificial epoch matching exact local time to avoid timezone math on ESP32
+  const localEpoch = Math.floor(now.getTime() / 1000) - (now.getTimezoneOffset() * 60);
+  fetch("/set_time?epoch=" + localEpoch).catch(e => console.log(e));
+}
+syncTime(); // Automatically sync when dashboard opens
 
 // --- Graph Logic ---
 const maxPoints = 60; 
@@ -234,6 +265,45 @@ void handleToggleAlarm() {
   server.send(200, "text/plain", manualAlarm ? "ON" : "OFF");
 }
 
+void handleDownload() {
+  File file = LittleFS.open("/data_log.csv", "r");
+  if (!file) {
+    server.send(404, "text/plain", "Log file not found. Restart ESP32.");
+    return;
+  }
+  server.sendHeader("Content-Disposition", "attachment; filename=\"solar_data.csv\"");
+  server.streamFile(file, "text/csv");
+  file.close();
+}
+
+void handleClearLog() {
+  // Opening in "w" mode immediately wipes any existing data and starts fresh
+  File file = LittleFS.open("/data_log.csv", "w");
+  if (file) {
+    file.println("Timestamp,Temperature(C),Irradiance(%),Location,Status");
+    file.close();
+    server.send(200, "text/plain", "Data Cleared");
+    Serial.println("-> /data_log.csv was wiped and new headers were written!");
+  } else {
+    server.send(500, "text/plain", "Failed to clear data");
+  }
+}
+
+void handleSetTime() {
+  if (server.hasArg("epoch")) {
+    long epoch = server.arg("epoch").toInt();
+    struct timeval tv;
+    tv.tv_sec = epoch;
+    tv.tv_usec = 0;
+    settimeofday(&tv, NULL);
+    timeSynced = true;
+    server.send(200, "text/plain", "Time Synced");
+    Serial.println("-> ESP32 Clock Synced with Browser!");
+  } else {
+    server.send(400, "text/plain", "Missing epoch");
+  }
+}
+
 // Redirect unknown paths to root
 void handleNotFound() {
   server.sendHeader("Location", "http://solar.panel", true);
@@ -276,6 +346,28 @@ void setup() {
 
   // ADC Config
   analogReadResolution(12);
+
+  // LittleFS Config
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS Mount Failed");
+  } else {
+    Serial.println("LittleFS Mounted successfully");
+    File file = LittleFS.open("/data_log.csv", "r");
+    if (!file) {
+      Serial.println("Creating new data_log.csv header...");
+      file = LittleFS.open("/data_log.csv", "w");
+      if (file) {
+        file.println("Timestamp,Temperature(C),Irradiance(%),Location,Status");
+        file.close();
+      }
+    } else {
+      file.close(); // File exists
+    }
+  }
+
+  // Fan Config
+  pinMode(fanPin, OUTPUT);
+  digitalWrite(fanPin, LOW); // Make sure fan is off at boot
 
   // DFPlayer Config
   dfSerial.begin(9600, SERIAL_8N1, dfplayerRX, dfplayerTX);
@@ -324,6 +416,9 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/readings", handleReadings);
   server.on("/toggle_alarm", handleToggleAlarm);
+  server.on("/download", HTTP_GET, handleDownload);
+  server.on("/clear_log", HTTP_GET, handleClearLog);
+  server.on("/set_time", HTTP_GET, handleSetTime);
   server.onNotFound(handleNotFound); // Catch-all for other URLs
   server.begin();
   Serial.println("Web Server Started.");
@@ -390,6 +485,9 @@ void loop() {
         myDFPlayer.loop(1);
         isPlayingMP3 = true;
       }
+      
+      // Turn on Cooling Fan
+      digitalWrite(fanPin, HIGH);
 
     } else {
       currentStatus = "System Normal";
@@ -404,6 +502,40 @@ void loop() {
       if (isPlayingMP3) {
         myDFPlayer.pause();
         isPlayingMP3 = false;
+      }
+      
+      // Turn off Cooling Fan
+      digitalWrite(fanPin, LOW);
+    }
+    
+    // --- Log Data to LittleFS ---
+    if (millis() - lastLogTime > logInterval) {
+      lastLogTime = millis();
+      File file = LittleFS.open("/data_log.csv", "a");
+      if (file) {
+        // 1. Log Timestamp
+        if (timeSynced) {
+          time_t now;
+          time(&now);
+          struct tm timeinfo;
+          gmtime_r(&now, &timeinfo);
+          char timeStringBuff[30];
+          strftime(timeStringBuff, sizeof(timeStringBuff), "%Y-%m-%d %H:%M:%S", &timeinfo);
+          file.print(timeStringBuff);
+        } else {
+          file.print("Unsynced_Uptime_");
+          file.print(millis());
+        }
+        file.print(",");
+        
+        // 2. Log Sensor Data
+        file.print(currentTemp, 1); file.print(",");
+        file.print(currentLightPercent); file.print(",");
+        file.print(currentLocation); file.print(",");
+        file.println(currentStatus);
+        
+        file.close();
+        Serial.println("-> Data point saved to Flash Mem (LittleFS)");
       }
     }
 
