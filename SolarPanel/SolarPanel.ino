@@ -415,7 +415,8 @@ void setup() {
   // If we talk to it too fast, it will error out!
   delay(3000); 
 
-  if (!myDFPlayer.begin(dfSerial)) {
+  // Disable ACK (second parameter = false) so the ESP32 NEVER waits for a serial response and never freezes!
+  if (!myDFPlayer.begin(dfSerial, false, true)) {
     Serial.println("DFPlayer error! Check RX/TX wiring or SD Card.");
   } else {
     Serial.println("DFPlayer online.");
@@ -470,6 +471,12 @@ const long interval = 1000;
 void loop() {
   dnsServer.processNextRequest();
   server.handleClient();
+
+  // Clear incoming MP3 Serial messages. If unread, these crash the library's ACK waiter!
+  if (myDFPlayer.available()) {
+    myDFPlayer.readType();
+    myDFPlayer.read();
+  }
 
   // --- Fan Logic ---
   int fanSpeed;
@@ -554,7 +561,7 @@ void loop() {
 
       // Stop MP3 Alarm if temperature drops
       if (isPlayingMP3) {
-        myDFPlayer.pause();
+        myDFPlayer.stop(); // Using stop() instead of pause() prevents the DFPlayer module from freezing the Arduino serial buffer on the next trigger!
         isPlayingMP3 = false;
       }
       
