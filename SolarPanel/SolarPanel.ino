@@ -16,6 +16,19 @@
 #include <LittleFS.h>
 #include <time.h>
 #include <sys/time.h>
+#include <HTTPClient.h>
+#include <esp_wifi.h>
+#include <esp_eap_client.h>
+
+// --- Eduroam (WPA2-Enterprise) Settings ---
+const char* eap_ssid = "eduroam";
+const char* eap_identity = "fy21asi@leeds.ac.uk";
+const char* eap_username = "fy21asi@leeds.ac.uk";
+const char* eap_password = "1Yaallahrby@";
+
+// --- ThingSpeak Settings ---
+const char* writeKey = "7BW8Z615S5952O7B";
+const char* tsServer = "http://api.thingspeak.com/update";
 
 // --- WiFi & Server Settings ---
 const char *ssid = "SolarPanel_Monitor"; // Name of the WiFi network
@@ -415,13 +428,12 @@ void setup() {
   // If we talk to it too fast, it will error out!
   delay(3000); 
 
-  // Disable ACK (second parameter = false) so the ESP32 NEVER waits for a serial response and never freezes!
-  if (!myDFPlayer.begin(dfSerial, false, true)) {
+  // Reverted back to default initialization; some clones fail when ACKs are disabled!
+  if (!myDFPlayer.begin(dfSerial)) {
     Serial.println("DFPlayer error! Check RX/TX wiring or SD Card.");
   } else {
     Serial.println("DFPlayer online.");
-    myDFPlayer.volume(30); // Max Volume (0-30)
-    // Removed unconditional loop(1) from here!
+    myDFPlayer.volume(10); // Start at low Volume (0-30) to prevent power brownouts!
   }
 
 // Buzzer Config (Passive - Needs PWM)
@@ -432,12 +444,12 @@ void setup() {
   ledcAttachPin(buzzerPin, buzzerChannel);
 #endif
 
-  // WiFi Config (SoftAP)
+  // WiFi Config (SoftAP + Station)
   Serial.println("\n--- Starting Solar Panel Monitor ---");
 
   WiFi.disconnect(true);
   delay(100);
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA); // Dual mode: Host Dashboard & Connect to Eduroam
 
   Serial.print("Setting up WiFi AP: ");
   Serial.println(ssid);
@@ -446,6 +458,13 @@ void setup() {
   IPAddress IP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
   Serial.println(IP);
+
+  Serial.println("Connecting to University WiFi (eduroam) in background...");
+  esp_eap_client_set_identity((uint8_t *)eap_identity, strlen(eap_identity));
+  esp_eap_client_set_username((uint8_t *)eap_username, strlen(eap_username));
+  esp_eap_client_set_password((uint8_t *)eap_password, strlen(eap_password));
+  esp_wifi_sta_enterprise_enable();
+  WiFi.begin(eap_ssid);
 
   // --- DNS Server Config ---
   dnsServer.start(53, "*", IP);
@@ -467,6 +486,8 @@ void setup() {
 // --- Loop ---
 unsigned long lastTime = 0;
 const long interval = 1000;
+unsigned long lastTSLogTime = 0;
+const long tsLogInterval = 20000; // 20 seconds for ThingSpeak
 
 void loop() {
   dnsServer.processNextRequest();
@@ -596,6 +617,26 @@ void loop() {
         
         file.close();
         Serial.println("-> Data point saved to Flash Mem (LittleFS)");
+      }
+    }
+
+    // --- Upload Data to ThingSpeak ---
+    if (millis() - lastTSLogTime > tsLogInterval) {
+      lastTSLogTime = millis();
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("-> Uploading data to ThingSpeak...");
+        HTTPClient http;
+        String url = String(tsServer) + "?api_key=" + String(writeKey) + "&field7=" + String(currentTemp) + "&field8=" + String(currentLightPercent);
+        http.begin(url);
+        int httpCode = http.GET();
+        if (httpCode > 0) {
+          Serial.printf("ThingSpeak OK (Code: %d)\n", httpCode);
+        } else {
+          Serial.printf("ThingSpeak Failed: %s\n", http.errorToString(httpCode).c_str());
+        }
+        http.end();
+      } else {
+        Serial.println("-> ThingSpeak Skipped: Not connected to eduroam yet.");
       }
     }
 
